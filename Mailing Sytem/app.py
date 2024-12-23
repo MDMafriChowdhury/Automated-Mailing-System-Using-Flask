@@ -1,10 +1,11 @@
-    
-from flask import Flask, render_template, request
+import json
+from flask import Flask, request
 import pymysql
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime
+
 app = Flask(__name__)
 
 DB_HOST = ''
@@ -12,7 +13,7 @@ DB_NAME = ''
 DB_USER = ''
 DB_PASSWORD = ''
 
-def execute_query1(store_code, date):
+def execute_query1(store_codes, date):
     conn = pymysql.connect(
         host=DB_HOST,
         user=DB_USER,
@@ -23,31 +24,30 @@ def execute_query1(store_code, date):
     cur = conn.cursor()
     cur.execute("""
         SELECT 
-    %s AS DATE,
-    i.invoice,
-    s.store_name,
-    p.product_name,
-    id.quantity,
-    id.rate,
-    i.total_amount
-FROM 
-    store_set s
-LEFT JOIN 
-    invoice i ON i.store_id = s.store_id AND i.date = %s
-LEFT JOIN 
-    invoice_details id ON i.invoice_id = id.invoice_id
-LEFT JOIN 
-    product_information p ON id.product_id = p.product_id
-WHERE 
-    s.store_code = %s;
-
-    """, (date, date, store_code))
+            %s AS DATE,
+            i.invoice,
+            s.store_name,
+            p.product_name,
+            id.quantity,
+            id.rate,
+            i.total_amount
+        FROM 
+            store_set s
+        LEFT JOIN 
+            invoice i ON i.store_id = s.store_id AND i.date = %s
+        LEFT JOIN 
+            invoice_details id ON i.invoice_id = id.invoice_id
+        LEFT JOIN 
+            product_information p ON id.product_id = p.product_id
+        WHERE 
+            s.store_code IN %s;
+    """, (date, date, tuple(store_codes.split(','))))
     data = cur.fetchall()
     conn.close()
     return data
 
-# Function to execute SQL query
-def execute_query(store_code, date):
+# Function to execute SQL query 2
+def execute_query(store_codes, date):
     conn = pymysql.connect(
         host=DB_HOST,
         user=DB_USER,
@@ -74,18 +74,16 @@ def execute_query(store_code, date):
         LEFT JOIN 
             product_information p ON id.product_id = p.product_id
         WHERE 
-            s.store_code = %s
+            s.store_code IN %s
         GROUP BY 
-            id.rate
-    """, (date, date, store_code))
+            id.rate;
+    """, (date, date, tuple(store_codes.split(','))))
     data = cur.fetchall()
     conn.close()
     return data
 
-  
 
-# Function to retrieve store name based on store_id
-def get_store_name(store_id):
+def get_notification_channels(store_code):
     conn = pymysql.connect(
         host=DB_HOST,
         user=DB_USER,
@@ -94,30 +92,27 @@ def get_store_name(store_id):
         port=3306
     )
     cur = conn.cursor()
-    cur.execute("SELECT store_name FROM store_set WHERE store_code = %s", (store_id,))
-    store_name_row = cur.fetchone()  # Retrieve the result row
-
-    # Check if store_name_row is not None
-    if store_name_row:
-        store_name = store_name_row[0]  # Assuming store_name is the first column in the result
-    else:
-        store_name = None
-
+    cur.execute("""
+        SELECT notificaitonChannels
+        FROM store_set
+        WHERE store_code = %s;
+    """, (store_code,))
+    notification_channels = cur.fetchone()[0]  # Assuming notificationChannels is a single value
     conn.close()
-    return store_name
+    return notification_channels
+
 
 
 # Function to send email
-def send_email(data,data1, email_address, date, store_name, store_code):
+def send_email(data, data1, email_address, date, store_name, store_code):
     smtp_server = 'smtp.gmail.com'
     smtp_port = 587
-    sender_email = 'mohammadrakibur23@gmail.com'
-    sender_password = 'mkia fvhe uxug znuh'
+    sender_email = 'it@onutiative.com'
+    sender_password = 'auqn yqet rsla tone'
 
     # Calculate total quantity and total amount (taka)
     total_quantity = sum(row[4] if row[4] is not None else 0 for row in data)  # Summing the quantity (assuming it's the 5th column)
     total_amount = sum(row[6] if row[6] is not None else 0 for row in data)  # Summing the total amount (taka) (assuming it's the 7th column)
-  # Summing the total amount (taka) (assuming it's the 7th column)
 
     msg = MIMEMultipart()
     msg['From'] = sender_email
@@ -177,6 +172,19 @@ def send_email(data,data1, email_address, date, store_name, store_code):
             </tr> -->
         </table>
         <h3>Last Days Transaction Details:</h3>
+        
+    """
+    # Sorting unique store names by the numerical part
+    # Sorting unique store names by the last two or three digits of the store code
+    unique_store_names = sorted(set(row[2] for row in data1), key=lambda x: int(''.join(filter(str.isdigit, x))[-3:]))
+
+
+
+    # Generate table for each store
+    for store_name in unique_store_names:
+        store_data = [row for row in data1 if row[2] == store_name]
+        body += f"""
+        <h2>{store_name}</h2>
         <table>
             <tr>
                 <th>Date</th>
@@ -185,68 +193,66 @@ def send_email(data,data1, email_address, date, store_name, store_code):
                 <th>Product Name</th>
                 <th>Quantity</th>
                 <th>Rate (taka)</th>
-                <th>Total Amount (taka)</th>
+                <th>Amount (taka)</th>
             </tr>
-    """
+        """
 
-    # Adding transaction details
-    for row in data1:
-        body += "<tr>"
-        for item in row:
-            body += f"<td>{item}</td>"
-        body += "</tr>"
+        for row in store_data:
+            body += "<tr>"
+            for item in row:
+                body += f"<td>{item}</td>"
+            body += "</tr>"
 
-    # Closing the HTML body
+        body += "</table>"
+
     body += """
-        </table>
     </body>
     </html>
     """
 
-    # Attach the HTML content to the email
     msg.attach(MIMEText(body, 'html'))
 
-    # Sending the email
     server = smtplib.SMTP(smtp_server, smtp_port)
     server.starttls()
     server.login(sender_email, sender_password)
     server.sendmail(sender_email, email_address, msg.as_string())
     server.quit()
 
+import re
+def remove_numbers(store_name):
+    return re.sub(r'\d+', '', store_name)
+    
+def extract_numerical_part(store_name):
+    # Extract numerical part from store name
+    numerical_part = re.findall(r'\d+', store_name)
+    if numerical_part:
+        return int(numerical_part[0])
+    else:
+        return float('inf')     
 
 # Route for the main page
-@app.route("/", methods=["GET", "POST"])
-def index():
+@app.route("/get_data", methods=["POST"])
+def get_data():
     try:
-        notObj = {
-            "notObj": [  
-                {"channel":"email", "value":"rubayet.stl@squaregroup.com","store_code": "143"},  
-                {"channel":"email", "value":"biz@vendy.ltd","store_code": "143"},
-                {"channel":"email", "value":"rubayet.stl@squaregroup.com","store_code": "144"},  
-                {"channel":"email", "value":"biz@vendy.ltd","store_code": "144"},
-                {"channel":"email", "value":"rubayet.stl@squaregroup.com","store_code": "145"},  
-                {"channel":"email", "value":"biz@vendy.ltd","store_code": "145"},
-                {"channel":"email", "value":"rubayet.stl@squaregroup.com","store_code": "146"},  
-                {"channel":"email", "value":"biz@vendy.ltd","store_code": "146"},
-                {"channel":"email", "value":"niloykhan112026@gmail.com","store_code": "146"},
-                
-       
-            ]
-        }
-        for item in notObj["notObj"]:
+        data = request.json
+        store_codes = data.get('store_codes')
+        first_store_code = store_codes.split(',')[0]
+        notObj=get_notification_channels(first_store_code)
+        notObj = json.loads(notObj)
+        
+        
+        for item in notObj['notObj']:
             if item["channel"] == "email":
-                store_code = item["store_code"]
+                email_address = item["value"]
                 date = datetime.now().strftime('%m-%d-%Y')
-                #date='04/01/2024'
-               
-                print(date) # Modify this line to use the current date
-                data = execute_query(store_code, date)
-                data1 = execute_query1(store_code, date)
-                store_name = get_store_name(store_code)
-                if data:
-                    send_email(data, data1, item["value"], date, store_name, store_code)
+                email_data = execute_query(store_codes, date)
+                email_data1 = execute_query1(store_codes, date)
+                store_name = remove_numbers(email_data[0][2]) if email_data else None
+
+                if email_data:
+                    send_email(email_data, email_data1, email_address, date, store_name, store_codes)
                 else:
-                    send_email([(date, None, store_name, None, None, None, 0)], [], item["value"], date, store_name, store_code)
+                    send_email([(date, None, store_name, None, None, None, 0)], [], email_address, date, store_name, store_codes)
             elif item["channel"] == "sms":
                 # Logic for sending SMS
                 pass
@@ -256,3 +262,5 @@ def index():
 
 if __name__ == "__main__":
     app.run(debug=True, port=8080)
+
+
